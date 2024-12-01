@@ -1,0 +1,12 @@
+package config
+
+import "github.com/rs/zerolog"
+
+var Config = Cfg{
+	Env:           Dev,
+	WebserverAddr: "0.0.0.0:9999",
+	LogLevel:      zerolog.DebugLevel,
+	EsBuild: EsBuildConfig{
+		Port: 9998,
+	},
+}
