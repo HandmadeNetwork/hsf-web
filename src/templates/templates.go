@@ -1,7 +1,6 @@
 package templates
 
 import (
-	"context"
 	"embed"
 	"errors"
 	"hsf/src/ee"
@@ -77,7 +76,7 @@ func ReloadTemplates(templateFS fs.FS) (map[string]*template.Template, error) {
 }
 
 // WatchTemplates Watches the files/ folder for changes and reloads templates.
-func WatchTemplates(ctx context.Context) *jobs.Job {
+func WatchTemplates() *jobs.Job {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		panic(err)
@@ -115,7 +114,8 @@ func WatchTemplates(ctx context.Context) *jobs.Job {
 					templateReloadMutex.Unlock()
 					slog.Debug("Reloaded templates")
 				}
-			case <-ctx.Done():
+			case <-job.Ctx.Done():
+				slog.Info("Shutting down template watcher")
 				job.Finish()
 				return
 			}

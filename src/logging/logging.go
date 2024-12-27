@@ -17,7 +17,7 @@ import (
 )
 
 // See this file for a good color reference:
-// https://github.com/fatih/color/blob/master/color.go
+// https://github.com/fatih/color/blob/main/color.go
 
 var Reset = "\033[0m"
 var Bold = "\033[1m"

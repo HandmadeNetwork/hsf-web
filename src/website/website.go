@@ -17,13 +17,12 @@ import (
 func Start() {
 	logging.Info().Msg("Starting HSF webserver")
 
-	jobTracker := jobs.NewTracker(context.Background())
 	templates.LoadEmbedded()
 
-	jobTracker.Add(
-		templates.WatchTemplates(jobTracker),
-		buildcss.RunServer(jobTracker),
-	)
+	backgroundJobs := jobs.Jobs{
+		templates.WatchTemplates(),
+		buildcss.RunServer(),
+	}
 
 	server := http.Server{
 		Addr:    config.Config.WebserverAddr,
@@ -39,7 +38,7 @@ func Start() {
 		go func() {
 			go func() {
 				logging.Info().Msg("Shutting down background jobs...")
-				unfinished := jobTracker.Finish(10 * time.Second)
+				unfinished := backgroundJobs.CancelAndWait(10 * time.Second)
 				if len(unfinished) == 0 {
 					logging.Info().Msg("Background jobs closed gracefully")
 				} else {
@@ -54,7 +53,7 @@ func Start() {
 		}()
 
 		<-signals
-		logging.Warn().Strs("Unfinished background jobs", jobTracker.ListUnfinished()).Msg("Forcibly killed the website")
+		logging.Warn().Strs("Unfinished background jobs", backgroundJobs.ListUnfinished()).Msg("Forcibly killed the website")
 		os.Exit(1)
 	}()
 
