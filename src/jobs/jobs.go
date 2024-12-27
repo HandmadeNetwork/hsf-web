@@ -5,92 +5,98 @@ import (
 	"time"
 )
 
+/*
+ * This package provides utilities for running and waiting on background tasks
+ * in your application. It standardizes a few aspects of channels and contexts
+ * to provide a system that makes it easy to run background jobs that can be
+ * canceled and shut down gracefully.
+ */
+
+// A Job is used to handle and track the completion of an asynchronous or
+// background task. See ExampleJob in example_test.go for a complete example of
+// how to structure and use a Job.
 type Job struct {
-	Name string
-	c    chan struct{}
+	Name   string
+	Ctx    context.Context
+	cancel func()
+	done   chan struct{}
 }
 
 func New(name string) *Job {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Job{
-		Name: name,
-		c:    make(chan struct{}),
+		Name:   name,
+		Ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 }
 
-func Finished(name string) *Job {
-	job := New(name)
-	return job.Finish()
+// Sends a cancel signal to the Job, indicating that it should finish its work
+// and shut down. Internally, this cancels the Job's context. Expected to be
+// called from outside the job, e.g. when shutting down the application.
+func (j *Job) Cancel() {
+	j.cancel()
 }
 
+// Returns a channel that can be waited on to receive a Cancel signal from
+// outside (that is, when Cancel() has been called).
+func (j *Job) Canceled() <-chan struct{} {
+	return j.Ctx.Done()
+}
+
+// Marks the Job as finished, indicating that its work is completely done.
+// Expected to be called internally by the job code when the work is complete.
 func (j *Job) Finish() *Job {
-	close(j.c)
+	close(j.done)
 	return j
 }
 
-type Tracker struct {
-	ctx         context.Context
-	cancelFunc  context.CancelFunc
-	doneChan    chan struct{}
-	pendingJobs []*Job
+// Returns a channel that can be waited on to tell when the Job is finished
+// (that is, when Finish() has been called). Expected to be used outside the
+// job to tell when work is complete.
+func (j *Job) Finished() <-chan struct{} {
+	return j.done
 }
 
-func NewTracker(ctx context.Context) *Tracker {
-	cancelCtx, cancelFunc := context.WithCancel(ctx)
-	return &Tracker{
-		ctx:        cancelCtx,
-		cancelFunc: cancelFunc,
-		doneChan:   make(chan struct{}),
-	}
-}
+// A utility for running and canceling multiple jobs at once. Because this type
+// is simply a slice of Jobs, you can construct it using normal slice syntax.
+type Jobs []*Job
 
-func (tracker *Tracker) Add(job ...*Job) {
-	tracker.pendingJobs = append(tracker.pendingJobs, job...)
-}
-
-func (tracker *Tracker) Finish(timeoutDur time.Duration) []string {
+// Cancels all tracked jobs, giving them a chance to finish gracefully. Will
+// return when all jobs finish or when the timeout expires, whichever comes
+// first. Returns a list of all jobs that did not finish on time.
+func (jobs Jobs) CancelAndWait(timeout time.Duration) []string {
 	allDoneChan := make(chan struct{})
-	tracker.cancelFunc()
-	timer := time.NewTimer(timeoutDur)
+	for _, job := range jobs {
+		job.Cancel()
+	}
+	timer := time.NewTimer(timeout)
 
 	go func() {
-		for _, p := range tracker.pendingJobs {
-			<-p.c
+		for _, job := range jobs {
+			<-job.Finished()
 		}
 		close(allDoneChan)
 	}()
+
 	select {
 	case <-timer.C:
-		return tracker.ListUnfinished()
+		return jobs.ListUnfinished()
 	case <-allDoneChan:
 		return nil
 	}
 }
 
-func (tracker *Tracker) ListUnfinished() []string {
+func (jobs Jobs) ListUnfinished() []string {
 	unfinished := []string{}
-	for _, p := range tracker.pendingJobs {
+	for _, job := range jobs {
 		select {
-		case <-p.c:
+		case <-job.Finished():
 			continue
 		default:
-			unfinished = append(unfinished, p.Name)
+			unfinished = append(unfinished, job.Name)
 		}
 	}
 	return unfinished
-}
-
-func (tracker *Tracker) Deadline() (deadline time.Time, ok bool) {
-	return tracker.ctx.Deadline()
-}
-
-func (tracker *Tracker) Done() <-chan struct{} {
-	return tracker.ctx.Done()
-}
-
-func (tracker *Tracker) Err() error {
-	return tracker.ctx.Err()
-}
-
-func (tracker *Tracker) Value(key any) any {
-	return tracker.ctx.Value(key)
 }
