@@ -16,6 +16,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+/*
+ * We currently use a log library called zerolog. It is better than some other
+ * loggers. It is not amazing but it works. This file simply configures zerolog
+ * and contains utilities for use elsewhere.
+ */
+
 // See this file for a good color reference:
 // https://github.com/fatih/color/blob/main/color.go
 

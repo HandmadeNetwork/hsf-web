@@ -9,7 +9,6 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path"
 	"sync"
@@ -24,12 +23,12 @@ var embeddedTemplateFs embed.FS
 var templateReloadMutex = sync.Mutex{}
 var allTemplates map[string]*template.Template
 
-var ErrTemplateNotFound = errors.New("Template not found")
+var ErrTemplateNotFound = errors.New("template not found")
 
 func Render(wr io.Writer, name string, data any) error {
 	template, ok := allTemplates[name]
 	if !ok {
-		return ee.New(ErrTemplateNotFound, "Template not found: %s", name)
+		return ee.New(ErrTemplateNotFound, "trying to load template %s", name)
 	}
 	return template.Execute(wr, data)
 }
@@ -40,7 +39,7 @@ func LoadEmbedded() {
 	if err != nil {
 		panic(err)
 	}
-	slog.Debug("Loaded template")
+	logging.Debug().Msg("Loaded embedded templates")
 }
 
 func ReloadTemplates(templateFS fs.FS) (map[string]*template.Template, error) {
@@ -107,15 +106,15 @@ func WatchTemplates() *jobs.Job {
 				debouncerRunning = false
 				newTemplates, err := ReloadTemplates(watchFS)
 				if err != nil {
-					slog.Error("Failed to reload templates", "err", err)
+					logging.Error().Err(err).Msg("Failed to reload templates")
 				} else {
 					templateReloadMutex.Lock()
 					allTemplates = newTemplates
 					templateReloadMutex.Unlock()
-					slog.Debug("Reloaded templates")
+					logging.Debug().Msg("Reloaded templates")
 				}
 			case <-job.Ctx.Done():
-				slog.Info("Shutting down template watcher")
+				logging.Info().Msg("Shutting down template watcher")
 				job.Finish()
 				return
 			}
