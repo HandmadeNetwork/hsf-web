@@ -2,14 +2,6 @@ package config
 
 import "github.com/rs/zerolog"
 
-type Environment string
-
-const (
-	Dev  = "dev"
-	Beta = "beta"
-	Live = "live"
-)
-
 /*
  * Most web frameworks allow you to define config files in a text format like
  * JSON or YAML. However, this requires you to come up with some fussy mapping
@@ -20,6 +12,14 @@ const (
  * compiled binary on its own; in fact, we typically compile it directly on the
  * destination server.
  */
+
+type Environment string
+
+const (
+	Dev  = "dev"
+	Beta = "beta"
+	Live = "live"
+)
 
 type Cfg struct {
 	Env           Environment

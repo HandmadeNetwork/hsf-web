@@ -1,9 +1,8 @@
 package cmd
 
 import (
-	"hsf/src/logging"
+	"hsf/src/utils"
 	"hsf/src/website"
-	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -16,8 +15,5 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		logging.Error().Err(err).Msg("Cobra execution failed")
-		os.Exit(1)
-	}
+	utils.Must(rootCmd.Execute())
 }
