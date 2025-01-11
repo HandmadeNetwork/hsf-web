@@ -1,7 +1,7 @@
 package utils
 
 // Takes an (error) return and panics if there is an error.
-// Helps avoid `if err != nil` in scripts. Use sparingly in real code.
+// Helps avoid `if err != nil` in scripts.
 func Must(err error) {
 	if err != nil {
 		panic(err)
@@ -9,7 +9,7 @@ func Must(err error) {
 }
 
 // Takes a (something, error) return and panics if there is an error.
-// Helps avoid `if err != nil` in scripts. Use sparingly in real code.
+// Helps avoid `if err != nil` in scripts.
 func Must1[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
