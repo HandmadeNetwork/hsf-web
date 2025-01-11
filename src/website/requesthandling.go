@@ -12,23 +12,73 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
 )
 
+/*
+ * We use the standard library HTTP server, which performs fine but is pretty
+ * anemic in terms of features. We have therefore built a few systems on top to
+ * handle:
+ *
+ * - Routing (matching URLs to handler functions)
+ * - Middleware (applying common logic to a group of routes)
+ * - Buffering (modifying responses before they are actually sent)
+ *
+ * Requests and responses are handled by Handler functions, with the signature:
+ *
+ *   type Handler func(c *RequestContext) ResponseData
+ *
+ * The RequestContext contains basic data about the request, as well as
+ * whatever other custom data you like in your system (e.g. the current user).
+ * You are encouraged to modify RequestContext to fit the needs of your
+ * own site.
+ *
+ * ResponseData is simply a struct containing the properties of an HTTP
+ * response, e.g. status code, body, and headers. It is compatible with
+ * http.ResponseWriter, so it can be used with other libraries if necessary.
+ *
+ * Routing is performed simply by iterating over a list of regular expressions
+ * until one matches the current URL. You might expect this to be slow but it
+ * is actually very fast, and has yet to be any sort of bottleneck for us. It
+ * also gives much greater flexibility in what kinds of patterns can be matched
+ * (as compared to popular choices like trie-based routing), and we can handle
+ * path parameters using named capture groups.
+ *
+ * Middleware is simply wrapping Handlers in other Handlers, with functions of
+ * this signature:
+ *
+ *   type Middleware func(h Handler) Handler
+ *
+ * Middleware can be used to apply common logic to a group of routes, e.g.
+ * authentication, CSRF mitigation, timing attack mitigation, etc.
+ */
+
 type RequestContext struct {
-	ctx              context.Context
+	ctx context.Context
+
 	Logger           *zerolog.Logger
 	Req              *http.Request
 	PathParams       map[string]string
 	RequestStartTime time.Time
 
-	// NOTE(asaf): This is the http package's internal response object. Not just a ResponseWriter.
-	//             We sometimes need the original response object so that some functions of the http package can set connection-management flags on it.
+	// This is the http package's internal response object. Not just a
+	// ResponseWriter. We sometimes need the original response object so that
+	// some functions of the http package can set connection-management flags
+	// on it.
 	Res http.ResponseWriter
+
+	// Below this point you may put whatever custom fields you like, to be set by
+	// middleware and used throughout your handlers. We include one field as
+	// an example.
+
+	LongRunningRequests *LongRunningRequestTracker
 }
+
+var _ context.Context = &RequestContext{}
 
 func (c *RequestContext) Deadline() (time.Time, bool) {
 	return c.ctx.Deadline()
@@ -46,13 +96,31 @@ func (c *RequestContext) Value(key any) any {
 	return c.ctx.Value(key)
 }
 
+func (c *RequestContext) IsLongRunning() func() {
+	c.LongRunningRequests.wg.Add(1)
+	doneAlreadyCalled := false
+	return func() {
+		if doneAlreadyCalled {
+			return
+		}
+		doneAlreadyCalled = true
+		c.LongRunningRequests.wg.Done()
+	}
+}
+
 type ResponseData struct {
-	Hijacked   bool
 	StatusCode int
 	Body       *bytes.Buffer
 
+	// Set to true to prevent the HSF system from handling the request and
+	// response, e.g. if you are proxying the request to another system
+	// like esbuild.
+	Proxied bool
+
 	header http.Header
 }
+
+var _ http.ResponseWriter = &ResponseData{}
 
 func (rd *ResponseData) Header() http.Header {
 	if rd.header == nil {
@@ -81,6 +149,8 @@ func (rd *ResponseData) SetCookie(cookie *http.Cookie) {
 type Router struct {
 	Routes []Route
 }
+
+var _ http.Handler = &Router{}
 
 type Route struct {
 	Method  string
@@ -116,7 +186,7 @@ func applyMiddlewares(h Handler, ms []Middleware) Handler {
 func (rb *RouteBuilder) Handle(methods []string, regex *regexp.Regexp, h Handler) {
 	// Ensure that this regex matches the start of the string
 	regexStr := regex.String()
-	if len(regexStr) == 0 || regexStr[0] != '^' {
+	if !strings.HasPrefix(regexStr, "^") {
 		panic("All routing regexes must begin with '^'")
 	}
 
@@ -238,10 +308,8 @@ nextroute:
 
 func doRequest(rw http.ResponseWriter, c *RequestContext, h Handler) {
 	defer func() {
-		/*
-			This panic recovery is the last resort. If you want to render
-			an error page or something, make it a request wrapper.
-		*/
+		// This panic recovery is the last resort. If you want to render
+		// an error page or something, make it a request wrapper.
 		if recovered := recover(); recovered != nil {
 			rw.WriteHeader(http.StatusInternalServerError)
 			logging.LogPanicValue(c.Logger, recovered, "request panicked and was not handled")
@@ -252,7 +320,7 @@ func doRequest(rw http.ResponseWriter, c *RequestContext, h Handler) {
 	// Run the chosen handler
 	res := h(c)
 
-	if res.Hijacked {
+	if res.Proxied {
 		// NOTE(asaf): In case we forward the request/response to another handler
 		//             (like esbuild).
 		return
@@ -296,24 +364,20 @@ func doRequest(rw http.ResponseWriter, c *RequestContext, h Handler) {
 	if res.Body != nil {
 		// Write preamble, if any
 		_, err := rw.Write(preamble)
-		if err != nil {
-			if errors.Is(err, syscall.EPIPE) {
-				// NOTE(asaf): Can be triggered when other side hangs up
-				logging.Debug().Msg("Broken pipe")
-			} else {
-				logging.Error().Err(err).Msg("Failed to write response preamble")
-			}
+		if errors.Is(err, syscall.EPIPE) {
+			// NOTE(asaf): Can be triggered when other side hangs up
+			logging.Debug().Msg("Broken pipe")
+		} else if err != nil {
+			logging.Error().Err(err).Msg("Failed to write response preamble")
 		}
 
 		// Write remainder of body
 		_, err = io.Copy(rw, res.Body)
-		if err != nil {
-			if errors.Is(err, syscall.EPIPE) {
-				// NOTE(asaf): Can be triggered when other side hangs up
-				logging.Debug().Msg("Broken pipe")
-			} else {
-				logging.Error().Err(err).Msg("copied res.Body")
-			}
+		if errors.Is(err, syscall.EPIPE) {
+			// NOTE(asaf): Can be triggered when other side hangs up
+			logging.Debug().Msg("Broken pipe")
+		} else if err != nil {
+			logging.Error().Err(err).Msg("copied res.Body")
 		}
 	}
 }
@@ -385,4 +449,41 @@ func ReqGetIP(req *http.Request) *netip.Prefix {
 	}
 
 	return nil
+}
+
+type LongRunningRequestTracker struct {
+	ctx    context.Context
+	cancel func()
+
+	wg sync.WaitGroup
+}
+
+func NewLongRunningRequestTracker() *LongRunningRequestTracker {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &LongRunningRequestTracker{
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+func (t *LongRunningRequestTracker) Cancel() {
+	t.cancel()
+}
+
+func (t *LongRunningRequestTracker) Canceled() <-chan struct{} {
+	return t.ctx.Done()
+}
+
+func (t *LongRunningRequestTracker) Wait(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		done <- struct{}{}
+	}()
+	timer := time.NewTimer(timeout)
+	select {
+	case <-timer.C:
+		logging.Warn().Msg("long-running requests failed to shut down in time")
+	case <-done:
+	}
 }
